@@ -37,17 +37,24 @@ GRID_STEP = 0.0015
 def load_ml():
     global safety_model, grid_df
     try:
-        safety_model = joblib.load(MODEL_PATH)
-        print("✅ Safety model loaded")
+        if os.path.exists(MODEL_PATH):
+            safety_model = joblib.load(MODEL_PATH)
+            print("✅ Safety model loaded")
+        else:
+            print("❌ Safety model file not found:", MODEL_PATH)
+            safety_model = None
 
         if os.path.exists(GRID_PATH):
             grid_df = pd.read_csv(GRID_PATH)
-            print("✅ Grid features loaded")
+            print(f"✅ Grid features loaded: {len(grid_df)} cells")
         else:
-            print("⚠️ grid_features.csv not found – fallback scoring enabled")
+            print("⚠️ grid_features.csv not found – run generate_grid_features.py to create it")
+            grid_df = None
 
     except Exception as e:
-        print("❌ ML load failed:", e)
+        print(f"❌ ML load failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 load_ml()
@@ -173,19 +180,47 @@ def safety_score_point():
 # ======================================================
 @app.route("/api/score-route", methods=["POST"])
 def score_route():
+    if safety_model is None:
+        return jsonify({"error": "Safety model not loaded. Check backend logs."}), 500
+    
+    if grid_df is None:
+        return jsonify({"error": "Grid features not loaded. Run generate_grid_features.py first."}), 500
+
     data = request.json or {}
     coords = data.get("coords")
 
     if not coords:
         return jsonify({"error": "coords required"}), 400
 
-    X = np.array([get_cell_features(p[0], p[1]) for p in coords])
-    preds = safety_model.predict(X)
+    if not isinstance(coords, list) or len(coords) == 0:
+        return jsonify({"error": "coords must be a non-empty array"}), 400
 
-    return jsonify({
-        "score": float(np.mean(preds)),
-        "segments": preds.tolist()
-    })
+    try:
+        # Sample coordinates if route is very long (to avoid processing too many points)
+        if len(coords) > 1000:
+            step = len(coords) // 1000
+            coords = coords[::step]
+        
+        X = np.array([get_cell_features(p[0], p[1]) for p in coords])
+        
+        if X.shape[0] == 0:
+            return jsonify({"error": "No valid coordinates to score"}), 400
+        
+        preds = safety_model.predict(X)
+        
+        # Clip scores to valid range (1-10) and calculate mean
+        preds_clipped = np.clip(preds, 1, 10)
+        avg_score = float(np.mean(preds_clipped))
+        
+        return jsonify({
+            "score": round(avg_score, 2),
+            "segments": [round(float(x), 2) for x in preds_clipped[:100]]  # Limit segments for response size
+        })
+    except Exception as e:
+        print(f"Error scoring route: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to calculate safety score: {str(e)}"}), 500
 
 
 # ======================================================
@@ -193,23 +228,63 @@ def score_route():
 # ======================================================
 @app.route("/api/sos", methods=["POST"])
 def sos():
-    d = request.json
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO sos_alerts (user_id, lat, lng, message, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        d["user_id"], d["lat"], d["lng"],
-        d["message"], d["timestamp"]
-    ))
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "🚨 SOS logged"}), 201
+    try:
+        d = request.json or {}
+        
+        # Validate required fields
+        lat = d.get("lat")
+        lng = d.get("lng")
+        timestamp = d.get("timestamp")
+        
+        if lat is None or lng is None:
+            return jsonify({"error": "Latitude and longitude are required"}), 400
+        
+        if timestamp is None:
+            return jsonify({"error": "Timestamp is required"}), 400
+        
+        # user_id is optional (can be None for anonymous users)
+        user_id = d.get("user_id")
+        message = d.get("message", "HELP ME")
+        
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sos_alerts (user_id, lat, lng, message, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            user_id, lat, lng, message, timestamp
+        ))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "message": "🚨 SOS alert sent successfully",
+            "alert_id": cur.lastrowid
+        }), 201
+        
+    except Exception as e:
+        print(f"Error processing SOS alert: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to process SOS alert"}), 500
+
+
+# ======================================================
+# RELOAD ML MODEL (for development)
+# ======================================================
+@app.route("/api/reload-ml", methods=["POST"])
+def reload_ml():
+    load_ml()
+    if safety_model is None or grid_df is None:
+        return jsonify({"error": "Failed to reload ML model"}), 500
+    return jsonify({"message": "ML model reloaded successfully"}), 200
 
 
 # ======================================================
 # RUN
 # ======================================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    # When running on platforms like Render, the port is provided via the
+    # PORT environment variable. Locally, we fall back to 5001.
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False)

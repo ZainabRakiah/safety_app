@@ -19,6 +19,9 @@ export default function App() {
   const destInputRef = useRef(null);
 
   const [routeScore, setRouteScore] = useState(null);
+  const [isCalculatingScore, setIsCalculatingScore] = useState(false);
+  const [isLocating, setIsLocating] = useState(true);
+  const routeCalculationRef = useRef(null);
 
   useEffect(() => {
     if (mapRef.current) return; // prevent double init
@@ -36,7 +39,37 @@ export default function App() {
     }).addTo(map);
 
     // 3) Live GPS tracking + real-time safety popup
+    // Automatically request location on page load
     if (navigator.geolocation) {
+      // First, try to get current position immediately
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          const current = [lat, lng];
+          currentPosRef.current = current;
+
+          // Create and place marker with custom blue icon
+          const icon = L.divIcon({
+            className: "user-location-marker",
+            html: '<div style="background-color: #3b82f6; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10],
+          });
+
+          liveMarkerRef.current = L.marker(current, { icon }).addTo(map);
+          map.setView(current, 16);
+          setIsLocating(false);
+          console.log("📍 Location found:", lat, lng);
+        },
+        (err) => {
+          console.warn("Initial location request failed, will try watchPosition:", err);
+          setIsLocating(false);
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+
+      // Then start watching position for continuous updates
       watchIdRef.current = navigator.geolocation.watchPosition(
         async (pos) => {
           const lat = pos.coords.latitude;
@@ -44,12 +77,27 @@ export default function App() {
           const current = [lat, lng];
           currentPosRef.current = current;
 
+          // Create icon for user location marker
+          const icon = L.divIcon({
+            className: "user-location-marker",
+            html: '<div style="background-color: #3b82f6; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10],
+          });
+
           // place / move live marker
           if (!liveMarkerRef.current) {
-            liveMarkerRef.current = L.marker(current).addTo(map);
+            liveMarkerRef.current = L.marker(current, { icon }).addTo(map);
             map.setView(current, 16);
+            setIsLocating(false);
+            console.log("📍 Location tracking started:", lat, lng);
           } else {
             liveMarkerRef.current.setLatLng(current);
+            setIsLocating(false);
+            // Smoothly update map view (only if user hasn't manually moved map)
+            if (map.getZoom() >= 15) {
+              map.setView(current, map.getZoom(), { animate: true, duration: 0.5 });
+            }
           }
 
           // 🔔 Real-time safety check using ML
@@ -59,6 +107,11 @@ export default function App() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ lat, lng }),
             });
+            
+            if (!res.ok) {
+              throw new Error(`API error: ${res.status}`);
+            }
+            
             const data = await res.json();
 
             if (data.safety_score !== undefined) {
@@ -70,15 +123,37 @@ export default function App() {
             }
           } catch (e) {
             console.error("Safety check failed:", e);
+            // Don't show alert for safety check failures, just log
           }
         },
         (err) => {
-          console.error("GPS error:", err);
+          console.error("GPS watchPosition error:", err);
+          let errorMsg = "";
+          
+          if (err.code === err.PERMISSION_DENIED) {
+            errorMsg = "❌ Location permission denied.\n\nPlease enable location access in your browser settings to use this feature.";
+          } else if (err.code === err.POSITION_UNAVAILABLE) {
+            errorMsg = "❌ Location information unavailable.\n\nPlease check your GPS settings.";
+          } else if (err.code === err.TIMEOUT) {
+            errorMsg = "⏱️ Location request timed out.\n\nPlease try again.";
+          } else {
+            errorMsg = "❌ Could not get your location.\n\nError code: " + err.code;
+          }
+          
+          // Only show alert once, not on every error
+          if (!currentPosRef.current) {
+            setIsLocating(false);
+            alert(errorMsg);
+          }
         },
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+        { 
+          enableHighAccuracy: true, 
+          maximumAge: 5000,  // Accept cached position up to 5 seconds old
+          timeout: 15000     // Wait up to 15 seconds
+        }
       );
     } else {
-      alert("Geolocation not supported on this device.");
+      alert("❌ Geolocation is not supported on this device or browser.");
     }
 
     // cleanup
@@ -103,13 +178,27 @@ export default function App() {
       return;
     }
 
+    // Cancel any previous route calculation
+    if (routeCalculationRef.current) {
+      routeCalculationRef.current.cancelled = true;
+    }
+
+    // Reset score immediately when starting a new route search
+    setRouteScore(null);
+    setIsCalculatingScore(true);
+
+    // Create a new calculation tracker
+    const calculation = { cancelled: false };
+    routeCalculationRef.current = calculation;
+
     try {
       let startCoords;
 
       // Use current GPS if start is empty or 'current'
       if (!startText || startText.toLowerCase().includes("current")) {
         if (!currentPosRef.current) {
-          alert("Current location not available yet.");
+          alert("Waiting for GPS signal… please try again in a few seconds.");
+          setIsCalculatingScore(false);
           return;
         }
         const [lat, lng] = currentPosRef.current;
@@ -122,32 +211,80 @@ export default function App() {
       const route = await fetchRoute(startCoords, destCoords);
       if (!route) {
         alert("No route found");
+        setIsCalculatingScore(false);
         return;
       }
 
       drawRoute(route);
 
-      // 🔢 Ask backend ML for safety score
+      // 🔢 Automatically calculate safety score for the route
       const coordsLatLng = route.geometry.coordinates.map(([lng, lat]) => [
         lat,
         lng,
       ]);
 
-      const res = await fetch(`${BACKEND_BASE}/api/score-route`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ coords: coordsLatLng }),
-      });
+      try {
+        console.log("Calculating safety score for route with", coordsLatLng.length, "points");
+        const res = await fetch(`${BACKEND_BASE}/api/score-route`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ coords: coordsLatLng }),
+        });
 
-      const data = await res.json();
-      if (data.score !== undefined) {
-        setRouteScore(Number(data.score).toFixed(1));
-      } else {
-        setRouteScore(null);
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({}));
+          console.error("Safety score API error:", errorData);
+          throw new Error(errorData.error || "Failed to calculate safety score");
+        }
+
+        const data = await res.json();
+        console.log("Safety score response:", data);
+        
+        // Check if this calculation was cancelled
+        if (calculation.cancelled) {
+          console.log("Route calculation was cancelled, ignoring result");
+          return;
+        }
+        
+        if (data.score !== undefined && data.score !== null) {
+          const score = Number(data.score).toFixed(1);
+          console.log("Setting safety score to:", score);
+          setRouteScore(score);
+          
+          // Force a small delay to ensure state update
+          setTimeout(() => {
+            if (!calculation.cancelled) {
+              console.log("Safety score confirmed:", score);
+            }
+          }, 100);
+          
+          // Alert if route is unsafe
+          if (data.score < 3) {
+            alert(`⚠️ Warning: This route has a low safety score (${score}/10). Consider an alternative route.`);
+          }
+        } else {
+          console.warn("Safety score was undefined in response");
+          if (!calculation.cancelled) {
+            setRouteScore(null);
+          }
+        }
+      } catch (scoreErr) {
+        console.error("Safety score calculation error:", scoreErr);
+        if (!calculation.cancelled) {
+          setRouteScore(null);
+        }
+        // Don't block the route display if scoring fails, but log it
+        console.error("Full error details:", scoreErr);
+      } finally {
+        if (!calculation.cancelled) {
+          setIsCalculatingScore(false);
+        }
       }
     } catch (err) {
-      console.error(err);
+      console.error("Route calculation error:", err);
       alert("Could not calculate route. Check console for details.");
+      setIsCalculatingScore(false);
+      setRouteScore(null);
     }
   }
 
@@ -176,15 +313,34 @@ export default function App() {
   // =========================
   async function handleSOS() {
     if (!navigator.geolocation) {
-      alert("GPS not supported");
+      alert("❌ GPS not supported on this device.");
+      return;
+    }
+
+    // Show confirmation before sending SOS
+    const confirmed = window.confirm(
+      "🚨 Are you sure you want to send an SOS alert?\n\n" +
+      "Your current location will be shared with emergency services."
+    );
+
+    if (!confirmed) {
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         try {
-          const userStr = sessionStorage.getItem("user");
-          const userId = userStr ? JSON.parse(userStr).id : null;
+          // Get user info if logged in (optional)
+          let userId = null;
+          try {
+            const userStr = sessionStorage.getItem("user");
+            if (userStr) {
+              const user = JSON.parse(userStr);
+              userId = user?.id || null;
+            }
+          } catch (e) {
+            console.log("No user session found, sending anonymous SOS");
+          }
 
           const payload = {
             user_id: userId,
@@ -194,23 +350,48 @@ export default function App() {
             timestamp: Date.now(),
           };
 
-          await fetch(`${BACKEND_BASE}/api/sos`, {
+          console.log("Sending SOS alert:", payload);
+
+          const res = await fetch(`${BACKEND_BASE}/api/sos`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
 
-          alert("🚨 SOS sent. Location shared!");
+          const data = await res.json();
+
+          if (!res.ok) {
+            throw new Error(data.error || "Failed to send SOS alert");
+          }
+
+          alert(
+            "✅ " + (data.message || "SOS alert sent successfully!") + "\n\n" +
+            "Your location has been shared. Help is on the way!"
+          );
         } catch (e) {
           console.error("SOS error:", e);
-          alert("Could not send SOS.");
+          alert(
+            "❌ Could not send SOS alert.\n\n" +
+            "Error: " + (e.message || "Unknown error") + "\n\n" +
+            "Please check your internet connection and try again."
+          );
         }
       },
       (err) => {
         console.error("SOS GPS error:", err);
-        alert("Could not get location for SOS.");
+        let errorMsg = "Could not get your location for SOS.";
+        
+        if (err.code === err.PERMISSION_DENIED) {
+          errorMsg = "❌ Location permission denied.\n\nPlease enable location access in your browser settings.";
+        } else if (err.code === err.TIMEOUT) {
+          errorMsg = "❌ Location request timed out.\n\nPlease try again.";
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          errorMsg = "❌ Location information unavailable.\n\nPlease check your GPS settings.";
+        }
+        
+        alert(errorMsg);
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   }
 
@@ -218,7 +399,7 @@ export default function App() {
   // RENDER
   // =========================
   return (
-    <div className="app-root">
+    <div className="app-root" style={{ position: "relative" }}>
       <div className="top-bar">
         <input
           ref={startInputRef}
@@ -238,7 +419,7 @@ export default function App() {
         <div className="score-chip">
           Safety:{" "}
           <span className="score-value">
-            {routeScore !== null ? routeScore : "—"}
+            {isCalculatingScore ? "..." : routeScore !== null ? routeScore : "—"}
           </span>
           /10
         </div>
@@ -249,6 +430,24 @@ export default function App() {
       </div>
 
       <div id="map" />
+      {isLocating && (
+        <div style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          background: "rgba(255, 255, 255, 0.95)",
+          padding: "20px 30px",
+          borderRadius: "10px",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          zIndex: 1000,
+          textAlign: "center"
+        }}>
+          <div style={{ fontSize: "24px", marginBottom: "10px" }}>📍</div>
+          <div style={{ fontWeight: "bold", marginBottom: "5px" }}>Getting your location...</div>
+          <div style={{ fontSize: "14px", color: "#666" }}>Please allow location access</div>
+        </div>
+      )}
     </div>
   );
 }

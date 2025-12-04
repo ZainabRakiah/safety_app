@@ -65,17 +65,21 @@ def init_db():
     """)
 
     # ========= SOS ALERT LOGS =========
+    # user_id is now nullable to allow anonymous SOS alerts
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sos_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            lat REAL,
-            lng REAL,
+            user_id INTEGER,
+            lat REAL NOT NULL,
+            lng REAL NOT NULL,
             message TEXT,
             timestamp INTEGER NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
+    
+    # If you have an existing database with user_id NOT NULL constraint,
+    # you may need to manually update it or delete database.db to recreate
 
     conn.commit()
     conn.close()
