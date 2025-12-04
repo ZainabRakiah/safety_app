@@ -2,3 +2,6 @@ flask
 flask-cors
 flask-jwt-extended
 werkzeug
+joblib
+pandas
+numpy
