@@ -66,7 +66,7 @@ export default function App() {
           console.warn("Initial location request failed, will try watchPosition:", err);
           setIsLocating(false);
         },
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 30000, maximumAge: 15000 }
       );
 
       // Then start watching position for continuous updates
