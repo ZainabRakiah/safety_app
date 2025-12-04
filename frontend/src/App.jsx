@@ -5,7 +5,9 @@ import "leaflet/dist/leaflet.css";
 import "./index.css";
 
 const OSRM_BASE = "https://router.project-osrm.org";
-const BACKEND_BASE = "http://127.0.0.1:5001";
+// Use env var in production, fall back to local Flask for dev
+const BACKEND_BASE =
+  import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:5001";
 
 export default function App() {
   const mapRef = useRef(null);
@@ -312,11 +314,6 @@ export default function App() {
   // SOS
   // =========================
   async function handleSOS() {
-    if (!navigator.geolocation) {
-      alert("❌ GPS not supported on this device.");
-      return;
-    }
-
     // Show confirmation before sending SOS
     const confirmed = window.confirm(
       "🚨 Are you sure you want to send an SOS alert?\n\n" +
@@ -327,71 +324,44 @@ export default function App() {
       return;
     }
 
+    // Prefer using the already-tracked live location if available
+    if (currentPosRef.current) {
+      const [lat, lng] = currentPosRef.current;
+      await sendSOSWithCoords(lat, lng);
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      alert("❌ GPS not supported on this device.");
+      return;
+    }
+
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        try {
-          // Get user info if logged in (optional)
-          let userId = null;
-          try {
-            const userStr = sessionStorage.getItem("user");
-            if (userStr) {
-              const user = JSON.parse(userStr);
-              userId = user?.id || null;
-            }
-          } catch (e) {
-            console.log("No user session found, sending anonymous SOS");
-          }
-
-          const payload = {
-            user_id: userId,
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            message: "HELP ME",
-            timestamp: Date.now(),
-          };
-
-          console.log("Sending SOS alert:", payload);
-
-          const res = await fetch(`${BACKEND_BASE}/api/sos`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          const data = await res.json();
-
-          if (!res.ok) {
-            throw new Error(data.error || "Failed to send SOS alert");
-          }
-
-          alert(
-            "✅ " + (data.message || "SOS alert sent successfully!") + "\n\n" +
-            "Your location has been shared. Help is on the way!"
-          );
-        } catch (e) {
-          console.error("SOS error:", e);
-          alert(
-            "❌ Could not send SOS alert.\n\n" +
-            "Error: " + (e.message || "Unknown error") + "\n\n" +
-            "Please check your internet connection and try again."
-          );
-        }
+        await sendSOSWithCoords(pos.coords.latitude, pos.coords.longitude);
       },
       (err) => {
         console.error("SOS GPS error:", err);
         let errorMsg = "Could not get your location for SOS.";
-        
+
         if (err.code === err.PERMISSION_DENIED) {
-          errorMsg = "❌ Location permission denied.\n\nPlease enable location access in your browser settings.";
+          errorMsg =
+            "❌ Location permission denied.\n\nPlease enable location access in your browser settings.";
         } else if (err.code === err.TIMEOUT) {
-          errorMsg = "❌ Location request timed out.\n\nPlease try again.";
+          errorMsg =
+            "❌ Location request timed out.\n\nPlease make sure location is enabled and try again.";
         } else if (err.code === err.POSITION_UNAVAILABLE) {
-          errorMsg = "❌ Location information unavailable.\n\nPlease check your GPS settings.";
+          errorMsg =
+            "❌ Location information unavailable.\n\nPlease check your GPS settings.";
         }
-        
+
         alert(errorMsg);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      {
+        enableHighAccuracy: true,
+        timeout: 30000, // give more time for location
+        maximumAge: 15000, // allow a recent cached fix
+      }
     );
   }
 
@@ -453,6 +423,61 @@ export default function App() {
 }
 
 /* ============ helpers ============ */
+
+// Reusable helper to send SOS to the backend with given coordinates
+async function sendSOSWithCoords(lat, lng) {
+  try {
+    // Get user info if logged in (optional)
+    let userId = null;
+    try {
+      const userStr = sessionStorage.getItem("user");
+      if (userStr) {
+        const user = JSON.parse(userStr);
+        userId = user?.id || null;
+      }
+    } catch (e) {
+      console.log("No user session found, sending anonymous SOS");
+    }
+
+    const payload = {
+      user_id: userId,
+      lat,
+      lng,
+      message: "HELP ME",
+      timestamp: Date.now(),
+    };
+
+    console.log("Sending SOS alert:", payload);
+
+    const res = await fetch(`${BACKEND_BASE}/api/sos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to send SOS alert");
+    }
+
+    alert(
+      "✅ " +
+        (data.message || "SOS alert sent successfully!") +
+        "\n\n" +
+        "Your location has been shared. Help is on the way!"
+    );
+  } catch (e) {
+    console.error("SOS error:", e);
+    alert(
+      "❌ Could not send SOS alert.\n\n" +
+        "Error: " +
+        (e.message || "Unknown error") +
+        "\n\n" +
+        "Please check your internet connection and try again."
+    );
+  }
+}
 
 async function geocode(query) {
   const url =
