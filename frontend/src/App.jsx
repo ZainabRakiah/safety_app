@@ -4,7 +4,6 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./index.css";
 
-const OSRM_BASE = "https://router.project-osrm.org";
 // Use env var in production, fall back to local Flask for dev
 const BACKEND_BASE =
   import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:5001";
@@ -498,12 +497,19 @@ async function geocode(query) {
 }
 
 async function fetchRoute(start, end) {
-  const url =
-    `${OSRM_BASE}/route/v1/foot/` +
-    `${start.lng},${start.lat};${end.lng},${end.lat}` +
-    `?overview=full&geometries=geojson`;
+  // Use backend proxy to avoid CORS issues
+  const url = `${BACKEND_BASE}/api/route?` +
+    `start_lng=${start.lng}&start_lat=${start.lat}&` +
+    `end_lng=${end.lng}&end_lat=${end.lat}&` +
+    `overview=full&geometries=geojson`;
 
   const res = await fetch(url);
+  
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || "Failed to fetch route");
+  }
+  
   const data = await res.json();
 
   if (!data.routes || !data.routes.length) {

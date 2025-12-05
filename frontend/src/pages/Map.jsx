@@ -5,6 +5,10 @@ import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility
 import { useState } from "react";
 import { getSafetyScore } from "../api/safety";
 
+// Use env var in production, fall back to local Flask for dev
+const BACKEND_BASE =
+  import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:5001";
+
 // -------- ML-based Route Scoring --------
 async function scoreRoute(routeCoords) {
   let scores = [];
@@ -46,10 +50,16 @@ export default function MapPage() {
     const [sLat, sLng] = await geo(start);
     const [dLat, dLng] = await geo(dest);
 
-    // ROUTE (OSRM)
+    // ROUTE (via backend proxy to avoid CORS)
     const r = await fetch(
-      `https://router.project-osrm.org/route/v1/foot/${sLng},${sLat};${dLng},${dLat}?geometries=geojson`
+      `${BACKEND_BASE}/api/route?start_lng=${sLng}&start_lat=${sLat}&end_lng=${dLng}&end_lat=${dLat}&overview=full&geometries=geojson`
     );
+    
+    if (!r.ok) {
+      const errorData = await r.json().catch(() => ({}));
+      throw new Error(errorData.error || "Failed to fetch route");
+    }
+    
     const rData = await r.json();
 
     const coords = rData.routes[0].geometry.coordinates;

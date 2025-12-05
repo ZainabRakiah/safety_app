@@ -5,6 +5,7 @@ import os
 import joblib
 import pandas as pd
 import numpy as np
+import requests
 
 from db import get_db, init_db
 
@@ -174,6 +175,46 @@ def safety_score_point():
     score = round(np.clip(score, 1, 10), 2)
 
     return jsonify({"safety_score": score})
+
+# ======================================================
+# OSRM ROUTE PROXY (to avoid CORS issues)
+# ======================================================
+@app.route("/api/route", methods=["GET"])
+def get_route():
+    """Proxy endpoint for OSRM routing service to avoid CORS issues."""
+    try:
+        start_lng = request.args.get("start_lng")
+        start_lat = request.args.get("start_lat")
+        end_lng = request.args.get("end_lng")
+        end_lat = request.args.get("end_lat")
+        overview = request.args.get("overview", "full")
+        geometries = request.args.get("geometries", "geojson")
+        
+        if not all([start_lng, start_lat, end_lng, end_lat]):
+            return jsonify({"error": "start_lng, start_lat, end_lng, end_lat are required"}), 400
+        
+        # Build OSRM URL
+        osrm_url = (
+            f"https://router.project-osrm.org/route/v1/foot/"
+            f"{start_lng},{start_lat};{end_lng},{end_lat}"
+            f"?overview={overview}&geometries={geometries}"
+        )
+        
+        # Make request to OSRM
+        response = requests.get(osrm_url, timeout=10)
+        response.raise_for_status()
+        
+        return jsonify(response.json()), 200
+        
+    except requests.exceptions.RequestException as e:
+        print(f"OSRM request error: {e}")
+        return jsonify({"error": f"Failed to fetch route: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Route proxy error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 # ======================================================
 # ML – ROUTE SAFETY SCORE
