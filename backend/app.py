@@ -39,8 +39,25 @@ def load_ml():
     global safety_model, grid_df
     try:
         if os.path.exists(MODEL_PATH):
-            safety_model = joblib.load(MODEL_PATH)
-            print("✅ Safety model loaded")
+            # Try loading with different compatibility options
+            try:
+                safety_model = joblib.load(MODEL_PATH, mmap_mode=None)
+                print("✅ Safety model loaded")
+            except Exception as e1:
+                # If that fails, try with pickle protocol compatibility
+                print(f"⚠️ Standard load failed ({e1}), trying compatibility mode...")
+                try:
+                    import pickle
+                    # Try loading with pickle protocol 4 (more compatible)
+                    with open(MODEL_PATH, 'rb') as f:
+                        safety_model = pickle.load(f)
+                    print("✅ Safety model loaded (compatibility mode)")
+                except Exception as e2:
+                    print(f"❌ Model load failed with both methods:")
+                    print(f"   Standard: {e1}")
+                    print(f"   Compatibility: {e2}")
+                    print("   💡 Tip: Retrain the model on Python 3.13 or use the same Python version")
+                    safety_model = None
         else:
             print("❌ Safety model file not found:", MODEL_PATH)
             safety_model = None
@@ -56,6 +73,8 @@ def load_ml():
         print(f"❌ ML load failed: {e}")
         import traceback
         traceback.print_exc()
+        safety_model = None
+        # Don't set grid_df to None here, let it try to load separately
 
 
 load_ml()
@@ -96,7 +115,13 @@ def get_cell_features(lat, lon):
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ SafeWalk Backend Running"
+    status = {
+        "status": "✅ SafeWalk Backend Running",
+        "model_loaded": safety_model is not None,
+        "grid_loaded": grid_df is not None,
+        "route_proxy": "available"
+    }
+    return jsonify(status)
 
 
 # ======================================================
@@ -317,7 +342,10 @@ def sos():
 def reload_ml():
     load_ml()
     if safety_model is None or grid_df is None:
-        return jsonify({"error": "Failed to reload ML model"}), 500
+        return jsonify({
+            "error": "Failed to reload ML model",
+            "tip": "If you see KeyError, the model was trained on a different Python version. Retrain with: python train_safety_model.py"
+        }), 500
     return jsonify({"message": "ML model reloaded successfully"}), 200
 
 

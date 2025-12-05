@@ -46,10 +46,10 @@ def train_model():
     model = LinearRegression()
     model.fit(X, y)
     
-    # Save the model
+    # Save the model with protocol 4 for better compatibility across Python versions
     model_path = os.path.join(BASE_DIR, "safety_model.pkl")
-    joblib.dump(model, model_path)
-    print(f"✅ Safety ML model trained & saved to {model_path}")
+    joblib.dump(model, model_path, protocol=4)
+    print(f"✅ Safety ML model trained & saved to {model_path} (protocol 4 for compatibility)")
     
     # Show model coefficients to understand feature importance
     print(f"\n📊 Model coefficients (feature importance):")
