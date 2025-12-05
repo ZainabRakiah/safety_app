@@ -183,8 +183,13 @@ def login():
 # ======================================================
 @app.route("/api/safety-score", methods=["POST"])
 def safety_score_point():
+    # Return a default score if model isn't loaded (graceful degradation)
     if safety_model is None or grid_df is None:
-        return jsonify({"error": "Safety model not loaded"}), 500
+        # Return a neutral score instead of error, so the app can still function
+        return jsonify({
+            "safety_score": 5.0,
+            "warning": "Safety model not loaded - using default score"
+        }), 200
 
     data = request.json
     lat = data.get("lat")
@@ -193,20 +198,104 @@ def safety_score_point():
     if lat is None or lng is None:
         return jsonify({"error": "lat & lng required"}), 400
 
-    # ✅ SAME features as training
-    features = np.array([ get_cell_features(lat, lng) ])
+    try:
+        # ✅ SAME features as training
+        features = np.array([ get_cell_features(lat, lng) ])
 
-    score = float(safety_model.predict(features)[0])
-    score = round(np.clip(score, 1, 10), 2)
+        score = float(safety_model.predict(features)[0])
+        score = round(np.clip(score, 1, 10), 2)
 
-    return jsonify({"safety_score": score})
+        return jsonify({"safety_score": score})
+    except Exception as e:
+        print(f"Error calculating safety score: {e}")
+        # Return default score on error instead of failing
+        return jsonify({
+            "safety_score": 5.0,
+            "warning": f"Error calculating score: {str(e)}"
+        }), 200
 
 # ======================================================
-# OSRM ROUTE PROXY (to avoid CORS issues)
+# ROUTE PROXY (supports multiple providers with API key support)
 # ======================================================
+def get_route_osrm(start_lng, start_lat, end_lng, end_lat, overview="full", geometries="geojson"):
+    """Get route from OSRM (no API key required, but rate-limited)."""
+    osrm_url = (
+        f"https://router.project-osrm.org/route/v1/foot/"
+        f"{start_lng},{start_lat};{end_lng},{end_lat}"
+        f"?overview={overview}&geometries={geometries}"
+    )
+    response = requests.get(osrm_url, timeout=30, headers={"User-Agent": "SafeWalk-App/1.0"})
+    response.raise_for_status()
+    return response.json()
+
+
+def get_route_mapbox(start_lng, start_lat, end_lng, end_lat, api_key):
+    """Get route from Mapbox Directions API (requires API key)."""
+    # Mapbox uses lng,lat format
+    coordinates = f"{start_lng},{start_lat};{end_lng},{end_lat}"
+    mapbox_url = (
+        f"https://api.mapbox.com/directions/v5/mapbox/walking/{coordinates}"
+        f"?geometries=geojson&overview=full&access_token={api_key}"
+    )
+    response = requests.get(mapbox_url, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    
+    # Convert Mapbox response to OSRM-like format
+    if data.get("code") == "Ok" and data.get("routes"):
+        route = data["routes"][0]
+        return {
+            "routes": [{
+                "geometry": route["geometry"],
+                "distance": route["distance"],
+                "duration": route["duration"]
+            }],
+            "code": "Ok"
+        }
+    return data
+
+
+def get_route_openrouteservice(start_lng, start_lat, end_lng, end_lat, api_key):
+    """Get route from OpenRouteService (requires API key, free tier available)."""
+    ors_url = "https://api.openrouteservice.org/v2/directions/foot-walking"
+    headers = {
+        "Authorization": api_key,
+        "Content-Type": "application/json"
+    }
+    body = {
+        "coordinates": [[start_lng, start_lat], [end_lng, end_lat]],
+        "format": "geojson"
+    }
+    response = requests.post(ors_url, json=body, headers=headers, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    
+    # Convert ORS response to OSRM-like format
+    if "features" in data and len(data["features"]) > 0:
+        feature = data["features"][0]
+        geometry = feature["geometry"]
+        properties = feature.get("properties", {})
+        summary = properties.get("summary", {})
+        return {
+            "routes": [{
+                "geometry": geometry,
+                "distance": summary.get("distance", 0),
+                "duration": summary.get("duration", 0)
+            }],
+            "code": "Ok"
+        }
+    return data
+
+
 @app.route("/api/route", methods=["GET"])
 def get_route():
-    """Proxy endpoint for OSRM routing service to avoid CORS issues."""
+    """Proxy endpoint for routing services to avoid CORS issues.
+    
+    Supports multiple providers:
+    - OSRM (default, no API key needed but rate-limited)
+    - Mapbox (requires MAPBOX_API_KEY env var)
+    - OpenRouteService (requires ORS_API_KEY env var)
+    """
     try:
         start_lng = request.args.get("start_lng")
         start_lat = request.args.get("start_lat")
@@ -218,27 +307,72 @@ def get_route():
         if not all([start_lng, start_lat, end_lng, end_lat]):
             return jsonify({"error": "start_lng, start_lat, end_lng, end_lat are required"}), 400
         
-        # Build OSRM URL
-        osrm_url = (
-            f"https://router.project-osrm.org/route/v1/foot/"
-            f"{start_lng},{start_lat};{end_lng},{end_lat}"
-            f"?overview={overview}&geometries={geometries}"
-        )
+        # Try providers in order of preference
+        providers = []
         
-        # Make request to OSRM
-        response = requests.get(osrm_url, timeout=10)
-        response.raise_for_status()
+        # Check for API keys and add providers
+        mapbox_key = os.environ.get("MAPBOX_API_KEY")
+        ors_key = os.environ.get("ORS_API_KEY")
         
-        return jsonify(response.json()), 200
+        if mapbox_key:
+            providers.append(("Mapbox", lambda: get_route_mapbox(start_lng, start_lat, end_lng, end_lat, mapbox_key)))
+        if ors_key:
+            providers.append(("OpenRouteService", lambda: get_route_openrouteservice(start_lng, start_lat, end_lng, end_lat, ors_key)))
+        # Always add OSRM as fallback
+        providers.append(("OSRM", lambda: get_route_osrm(start_lng, start_lat, end_lng, end_lat, overview, geometries)))
         
-    except requests.exceptions.RequestException as e:
-        print(f"OSRM request error: {e}")
-        return jsonify({"error": f"Failed to fetch route: {str(e)}"}), 500
+        # Try each provider with retries
+        max_retries = 2
+        timeout = 30
+        
+        for provider_name, provider_func in providers:
+            for attempt in range(max_retries + 1):
+                try:
+                    print(f"Trying {provider_name} (attempt {attempt + 1})...")
+                    result = provider_func()
+                    print(f"✅ Successfully got route from {provider_name}")
+                    return jsonify(result), 200
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries:
+                        print(f"{provider_name} timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                        continue
+                    else:
+                        print(f"{provider_name} failed after {max_retries + 1} attempts, trying next provider...")
+                        break
+                except requests.exceptions.HTTPError as e:
+                    if e.response:
+                        status = e.response.status_code
+                        if status == 401 or status == 403:
+                            print(f"{provider_name} authentication failed (check API key), trying next provider...")
+                            break
+                        elif status == 429:
+                            print(f"{provider_name} rate limited, trying next provider...")
+                            break
+                    # For other HTTP errors, try next provider
+                    print(f"{provider_name} HTTP error: {e}, trying next provider...")
+                    break
+                except requests.exceptions.ConnectionError:
+                    print(f"{provider_name} connection error, trying next provider...")
+                    break
+                except Exception as e:
+                    print(f"{provider_name} error: {e}, trying next provider...")
+                    break
+        
+        # If all providers failed
+        return jsonify({
+            "error": "All routing services failed. Please check your API keys or try again later.",
+            "type": "all_providers_failed",
+            "tip": "Set MAPBOX_API_KEY or ORS_API_KEY environment variables for better reliability"
+        }), 503
+        
     except Exception as e:
         print(f"Route proxy error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({
+            "error": f"Internal server error: {str(e)}",
+            "type": "server_error"
+        }), 500
 
 
 # ======================================================
