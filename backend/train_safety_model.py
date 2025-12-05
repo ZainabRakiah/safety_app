@@ -3,21 +3,28 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import joblib
 import os
+import sys
+
+# Fix encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GRID_PATH = os.path.join(BASE_DIR, "data", "grid_features.csv")
 
 
 def train_model():
-    print("📥 Loading grid features...")
+    print("Loading grid features...")
     
     # Use the location-specific features from grid_features.csv
     if not os.path.exists(GRID_PATH):
-        print("❌ grid_features.csv not found. Run generate_grid_features.py first.")
+        print("ERROR: grid_features.csv not found. Run generate_grid_features.py first.")
         return
     
     df = pd.read_csv(GRID_PATH)
-    print(f"✅ Loaded {len(df)} grid cells with location-specific features")
+    print(f"SUCCESS: Loaded {len(df)} grid cells with location-specific features")
     
     # Use the same feature names as in app.py: incident_count, camera_count, police_count
     # Map to the format expected: [incident_count, camera_count, police_count]
@@ -46,13 +53,17 @@ def train_model():
     model = LinearRegression()
     model.fit(X, y)
     
-    # Save the model with protocol 4 for better compatibility across Python versions
+    # Save the model with protocol 4 for maximum compatibility
+    # Protocol 4 works with Python 2.7+ and all Python 3.x versions
+    # This ensures compatibility between Python 3.14 (local) and Python 3.13 (Render)
     model_path = os.path.join(BASE_DIR, "safety_model.pkl")
+    import pickle
+    # Use protocol 4 for maximum compatibility across Python versions
     joblib.dump(model, model_path, protocol=4)
-    print(f"✅ Safety ML model trained & saved to {model_path} (protocol 4 for compatibility)")
+    print(f"SUCCESS: Safety ML model trained & saved to {model_path} (protocol 4, maximum compatibility)")
     
     # Show model coefficients to understand feature importance
-    print(f"\n📊 Model coefficients (feature importance):")
+    print(f"\nModel coefficients (feature importance):")
     print(f"   Incident count: {model.coef_[0]:.3f} (negative = reduces safety)")
     print(f"   Camera count: {model.coef_[1]:.3f} (positive = increases safety)")
     print(f"   Police count: {model.coef_[2]:.3f} (positive = increases safety)")
